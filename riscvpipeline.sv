@@ -89,7 +89,7 @@ module riscvpipeline (
       if (writeBackEn)
 	      RegisterBank[wbRdId] <= writeBackData;
 
-      if(writeBackEn && rdId(MW_instr) == rs1Id(FD_instr)) begin
+      /*if(writeBackEn && rdId(MW_instr) == rs1Id(FD_instr)) begin
             DE_rs1 <= writeBackData;
       end else begin
             DE_rs1 <= RegisterBank[rs1Id(FD_instr)];
@@ -99,7 +99,7 @@ module riscvpipeline (
             DE_rs2 <= writeBackData;
       end else begin
             DE_rs2 <= RegisterBank[rs2Id(FD_instr)];
-      end
+      end*/
    end
 
 /************************ E: Execute *****************************************/
