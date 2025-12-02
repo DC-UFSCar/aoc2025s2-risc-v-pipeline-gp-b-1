@@ -100,6 +100,7 @@ module riscvpipeline (
       end else begin
             DE_rs2 <= RegisterBank[rs2Id(FD_instr)];
       end*/
+
    end
 
 /************************ E: Execute *****************************************/
@@ -108,11 +109,35 @@ module riscvpipeline (
    reg [31:0] EM_rs2;
    reg [31:0] EM_Eresult;
    reg [31:0] EM_addr;
-   wire [31:0] E_aluIn1 = DE_rs1;
-   wire [31:0] E_aluIn2 = isALUreg(DE_instr) | isBranch(DE_instr) ? DE_rs2 : Iimm(DE_instr);
+
+
+   wire [31:0] E_aluIn1 =(forwardA == 2'b01) ? writeBackData : 
+                        (forwardA == 2'b10) ? EM_Eresult : 
+                        DE_rs1; 
+   wire [31:0] rs2_forward = (forwardB == 2'b01) ? writeBackData : 
+                           (forwardB == 2'b10) ? EM_Eresult : 
+                           DE_rs2; 
+                                 
+   wire [31:0] E_aluIn2 = isALUreg(DE_instr) | isBranch(DE_instr) ? rs2_forward : Iimm(DE_instr);
+
+
+
    wire [4:0]  E_shamt  = isALUreg(DE_instr) ? DE_rs2[4:0] : shamt(DE_instr);
    wire E_minus = DE_instr[30] & isALUreg(DE_instr);
    wire E_arith_shift = DE_instr[30];
+
+   
+   wire [1:0] forwardA; // Sinal para controlar o rs1 
+   wire [1:0] forwardB; //Sinal p controlar rs2 
+
+   assign forwardA = (writesRd(EM_instr) && (rdId(EM_instr) != 0) && (rdId(EM_instr) == rs1Id(DE_instr))) ? 2'b10 : //Sinal 10 se o rs1 da instrução atual for igual ao RD da instrução anterior(que tá em execute)
+                     (writesRd(MW_instr) && (rdId(MW_instr) != 0) && (rdId(MW_instr) == rs1Id(DE_instr))) ? 2'b01 : //sINAL 01 se o rs1 da instrução atual for igual ao RD da instrução anterior(que tá em memory)
+                     2'b00;
+
+   assign forwardB = (writesRd(EM_instr) && (rdId(EM_instr) != 0) && (rdId(EM_instr) == rs2Id(DE_instr))) ? 2'b10 : //mesma ideia, só q pro rs2
+                     (writesRd(MW_instr) && (rdId(MW_instr) != 0) && (rdId(MW_instr) == rs2Id(DE_instr))) ? 2'b01 :
+                     2'b00;
+   
 
    // The adder is used by both arithmetic instructions and JALR.
    wire [31:0] E_aluPlus = E_aluIn1 + E_aluIn2;
