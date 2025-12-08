@@ -1,12 +1,13 @@
 module riscvpipeline (
-    input 	  clk,
-    input 	  reset,
+    input        clk,
+    input        reset,
     output [31:0] PC,
     input  [31:0] Instr,
-    output [31:0] Address,  
-    output [31:0] WriteData, 
-    output        MemWrite,  
-    input  [31:0] ReadData);
+    output [31:0] Address,
+    output [31:0] WriteData,
+    output        MemWrite,
+    input  [31:0] ReadData
+);
 
    /* The 10 "recognizers" for the 10 codeops */
    function isALUreg; input [31:0] I; isALUreg=(I[6:0]==7'b0110011); endfunction
@@ -48,25 +49,50 @@ module riscvpipeline (
 
 /**********************  F: Instruction fetch *********************************/
    localparam NOP = 32'b0000000_00000_00000_000_00000_0110011;
+
    reg [31:0] F_PC;
    reg [31:0] FD_PC;
    reg [31:0] FD_instr;
    reg        FD_nop;
+
    assign PC = F_PC;
 
    /** These two signals come from the Execute stage **/
    wire [31:0] jumpOrBranchAddress;
    wire        jumpOrBranch;
 
+   /* Hazard control signals (computed later, usados aqui) */
+   wire stall;  // bolha após lw
+   // flush é simplesmente jumpOrBranch (desvio tomado)
+
+/*** IF stage com suporte a stall e flush ***/
    always @(posedge clk) begin
-      FD_instr <= Instr;
-      FD_PC    <= F_PC;
-      F_PC     <= F_PC + 4;
-      if (jumpOrBranch)
-    	   F_PC     <= jumpOrBranchAddress;
-      FD_nop <= reset;
-      if (reset)
-    	   F_PC <= 0;
+      if (reset) begin
+         F_PC    <= 32'b0;
+         FD_PC   <= 32'b0;
+         FD_instr<= NOP;
+         FD_nop  <= 1'b1;
+      end else begin
+         // Se não estiver em stall, o PC e o registrador FD avançam
+         if (!stall) begin
+            FD_instr <= Instr;
+            FD_PC    <= F_PC;
+
+            // PC sequencial
+            F_PC <= F_PC + 4;
+            // Redireciona em salto/desvio
+            if (jumpOrBranch)
+               F_PC <= jumpOrBranchAddress;
+         end
+
+         // FD_nop controla se a próxima instrução decodificada vira NOP
+         if (jumpOrBranch) begin
+            // flush da instrução que está em F/D
+            FD_nop <= 1'b1;
+         end else if (!stall) begin
+            FD_nop <= 1'b0;
+         end
+      end
    end
 
 /************************ D: Instruction decode *******************************/
@@ -81,26 +107,66 @@ module riscvpipeline (
    wire [4:0]  wbRdId;
 
    reg [31:0] RegisterBank [0:31];
-   always @(posedge clk) begin
-      DE_PC    <= FD_PC;
-      DE_instr <= FD_nop ? NOP : FD_instr;
-      DE_rs1 <= rs1Id(FD_instr) ? RegisterBank[rs1Id(FD_instr)] : 32'b0;
-      DE_rs2 <= rs2Id(FD_instr) ? RegisterBank[rs2Id(FD_instr)] : 32'b0;
-      if (writeBackEn)
-	      RegisterBank[wbRdId] <= writeBackData;
 
-      /*if(writeBackEn && rdId(MW_instr) == rs1Id(FD_instr)) begin
-            DE_rs1 <= writeBackData;
+   /* Índices de registradores na instrução em F/D */
+   wire [4:0] D_rs1Id = rs1Id(FD_instr);
+   wire [4:0] D_rs2Id = rs2Id(FD_instr);
+
+   /* Leitura básica do banco de registradores */
+   wire [31:0] D_rs1_val_raw = D_rs1Id ? RegisterBank[D_rs1Id] : 32'b0;
+   wire [31:0] D_rs2_val_raw = D_rs2Id ? RegisterBank[D_rs2Id] : 32'b0;
+
+   /* Bypass de writeback para leitura/escrita no mesmo ciclo */
+   wire [31:0] D_rs1_val =
+      (writeBackEn && wbRdId != 0 && wbRdId == D_rs1Id) ? writeBackData : D_rs1_val_raw;
+
+   wire [31:0] D_rs2_val =
+      (writeBackEn && wbRdId != 0 && wbRdId == D_rs2Id) ? writeBackData : D_rs2_val_raw;
+
+   /* Sinais auxiliares para hazard de lw */
+   wire [4:0] E_rdId   = rdId(DE_instr);
+   wire       E_isLoad = isLoad(DE_instr);
+   wire       D_readsRs1 = readsRs1(FD_instr);
+   wire       D_readsRs2 = readsRs2(FD_instr);
+
+   /* Hazard de load-use: lw em E, próxima instrução em D usa o rd */
+   wire loadUseHazard =
+      E_isLoad &&
+      (E_rdId != 0) &&
+      ( (D_readsRs1 && (D_rs1Id == E_rdId)) ||
+        (D_readsRs2 && (D_rs2Id == E_rdId)) );
+
+   assign stall = loadUseHazard; // uma bolha após lw quando necessário
+   wire flushD = jumpOrBranch;   // flush na D->E quando desvio é tomado
+
+   always @(posedge clk) begin
+      if (reset) begin
+         DE_PC    <= 32'b0;
+         DE_instr <= NOP;
+         DE_rs1   <= 32'b0;
+         DE_rs2   <= 32'b0;
+      end else if (flushD) begin
+         // Descarta a instrução que iria para E após um desvio tomado
+         DE_PC    <= 32'b0;
+         DE_instr <= NOP;
+         DE_rs1   <= 32'b0;
+         DE_rs2   <= 32'b0;
+      end else if (stall) begin
+         // Insere bolha em E (nop). A instrução em F/D fica "parada".
+         DE_instr <= NOP;
+         DE_rs1   <= 32'b0;
+         DE_rs2   <= 32'b0;
+         // DE_PC pode ser mantido ou zerado, não é relevante para NOP
       end else begin
-            DE_rs1 <= RegisterBank[rs1Id(FD_instr)];
+         DE_PC    <= FD_PC;
+         DE_instr <= FD_nop ? NOP : FD_instr;
+         DE_rs1   <= D_rs1_val;
+         DE_rs2   <= D_rs2_val;
       end
 
-      if(writeBackEn && rdId(MW_instr) == rs2Id(FD_instr)) begin
-            DE_rs2 <= writeBackData;
-      end else begin
-            DE_rs2 <= RegisterBank[rs2Id(FD_instr)];
-      end*/
-
+      // Escrita no banco de registradores (writeback)
+      if (writeBackEn)
+         RegisterBank[wbRdId] <= writeBackData;
    end
 
 /************************ E: Execute *****************************************/
@@ -110,34 +176,65 @@ module riscvpipeline (
    reg [31:0] EM_Eresult;
    reg [31:0] EM_addr;
 
+   /* Índices na instrução em E */
+   wire [4:0] E_rs1Id = rs1Id(DE_instr);
+   wire [4:0] E_rs2Id = rs2Id(DE_instr);
 
-   wire [31:0] E_aluIn1 =(forwardA == 2'b01) ? writeBackData : 
-                        (forwardA == 2'b10) ? EM_Eresult : 
-                        DE_rs1; 
-   wire [31:0] rs2_forward = (forwardB == 2'b01) ? writeBackData : 
-                           (forwardB == 2'b10) ? EM_Eresult : 
-                           DE_rs2; 
-                                 
-   wire [31:0] E_aluIn2 = isALUreg(DE_instr) | isBranch(DE_instr) ? rs2_forward : Iimm(DE_instr);
+   /* Informações das instruções em M e W para encaminhamento */
+   wire [4:0] M_rdId     = rdId(EM_instr);
+   wire       M_writesRd = writesRd(EM_instr);
+   wire       M_isLoad   = isLoad(EM_instr);
 
+   wire [4:0] W_rdId     = rdId(MW_instr);
+   wire       W_writesRd = writesRd(MW_instr);
 
+   /* Resultado que sai da etapa M (ALU/JAL/LUI/AUIPC etc.) */
+   wire [31:0] M_result = EM_Eresult;
 
-   wire [4:0]  E_shamt  = isALUreg(DE_instr) ? DE_rs2[4:0] : shamt(DE_instr);
-   wire E_minus = DE_instr[30] & isALUreg(DE_instr);
+   /* Resultado que sai da etapa W (já decide entre ALU e LOAD) */
+   wire [31:0] W_result =
+      isLoad(MW_instr) ? MW_Mdata : MW_Eresult;
+
+   /* Encaminhamento para rs1 em E */
+   wire forwardA_fromM =
+      M_writesRd && !M_isLoad && (M_rdId != 0) && (M_rdId == E_rs1Id);
+
+   wire forwardA_fromW =
+      W_writesRd && (W_rdId != 0) && (W_rdId == E_rs1Id);
+
+   wire [31:0] E_rs1_val =
+      forwardA_fromM ? M_result :
+      forwardA_fromW ? W_result :
+      DE_rs1;
+
+   /* Encaminhamento para rs2 em E */
+   wire forwardB_fromM =
+      M_writesRd && !M_isLoad && (M_rdId != 0) && (M_rdId == E_rs2Id);
+
+   wire forwardB_fromW =
+      W_writesRd && (W_rdId != 0) && (W_rdId == E_rs2Id);
+
+   wire [31:0] E_rs2_val =
+      forwardB_fromM ? M_result :
+      forwardB_fromW ? W_result :
+      DE_rs2;
+
+   /* Entradas da ALU (já com encaminhamento aplicado) */
+   wire [31:0] E_aluIn1 = E_rs1_val;
+   wire [31:0] E_aluSrc2Reg = E_rs2_val;
+
+   wire [31:0] E_aluIn2 =
+      (isALUreg(DE_instr) | isBranch(DE_instr)) ? E_aluSrc2Reg : Iimm(DE_instr);
+
+   wire [4:0]  E_shamt  =
+      isALUreg(DE_instr) ? E_aluSrc2Reg[4:0] : shamt(DE_instr);
+
+   wire E_minus       = DE_instr[30] & isALUreg(DE_instr);
    wire E_arith_shift = DE_instr[30];
 
-   
-   wire [1:0] forwardA; // Sinal para controlar o rs1 
-   wire [1:0] forwardB; //Sinal p controlar rs2 
-
-   assign forwardA = (writesRd(EM_instr) && (rdId(EM_instr) != 0) && (rdId(EM_instr) == rs1Id(DE_instr))) ? 2'b10 : //Sinal 10 se o rs1 da instrução atual for igual ao RD da instrução anterior(que tá em execute)
-                     (writesRd(MW_instr) && (rdId(MW_instr) != 0) && (rdId(MW_instr) == rs1Id(DE_instr))) ? 2'b01 : //sINAL 01 se o rs1 da instrução atual for igual ao RD da instrução anterior(que tá em memory)
-                     2'b00;
-
-   assign forwardB = (writesRd(EM_instr) && (rdId(EM_instr) != 0) && (rdId(EM_instr) == rs2Id(DE_instr))) ? 2'b10 : //mesma ideia, só q pro rs2
-                     (writesRd(MW_instr) && (rdId(MW_instr) != 0) && (rdId(MW_instr) == rs2Id(DE_instr))) ? 2'b01 :
-                     2'b00;
-   
+   // Alias para o $monitor do testbench
+   wire [31:0] aluIn1 = E_aluIn1;
+   wire [31:0] aluIn2 = E_aluIn2;
 
    // The adder is used by both arithmetic instructions and JALR.
    wire [31:0] E_aluPlus = E_aluIn1 + E_aluIn2;
@@ -154,13 +251,17 @@ module riscvpipeline (
    function [31:0] flip32;
       input [31:0] x;
       flip32 = {x[ 0], x[ 1], x[ 2], x[ 3], x[ 4], x[ 5], x[ 6], x[ 7],
-		x[ 8], x[ 9], x[10], x[11], x[12], x[13], x[14], x[15],
-		x[16], x[17], x[18], x[19], x[20], x[21], x[22], x[23],
-		x[24], x[25], x[26], x[27], x[28], x[29], x[30], x[31]};
+                x[ 8], x[ 9], x[10], x[11], x[12], x[13], x[14], x[15],
+                x[16], x[17], x[18], x[19], x[20], x[21], x[22], x[23],
+                x[24], x[25], x[26], x[27], x[28], x[29], x[30], x[31]};
    endfunction
 
-   wire [31:0] E_shifter_in = funct3(DE_instr) == 3'b001 ? flip32(E_aluIn1) : E_aluIn1;
-   wire [31:0] E_shifter = $signed({E_arith_shift & E_aluIn1[31], E_shifter_in}) >>> E_aluIn2[4:0];
+   wire [31:0] E_shifter_in =
+      funct3(DE_instr) == 3'b001 ? flip32(E_aluIn1) : E_aluIn1;
+
+   wire [31:0] E_shifter =
+      $signed({E_arith_shift & E_aluIn1[31], E_shifter_in}) >>> E_aluIn2[4:0];
+
    wire [31:0] E_leftshift = flip32(E_shifter);
 
    reg [31:0] E_aluOut;
@@ -198,23 +299,24 @@ module riscvpipeline (
    );
 
    wire [31:0] E_JumpOrBranchAddr =
-	isBranch(DE_instr) ? DE_PC + Bimm(DE_instr) :
-	isJAL(DE_instr)    ? DE_PC + Jimm(DE_instr) :
-	/* JALR */           {E_aluPlus[31:1],1'b0} ;
+      isBranch(DE_instr) ? DE_PC + Bimm(DE_instr) :
+      isJAL(DE_instr)    ? DE_PC + Jimm(DE_instr) :
+      /* JALR */           {E_aluPlus[31:1],1'b0} ;
 
    wire [31:0] E_result =
-	(isJAL(DE_instr) | isJALR(DE_instr)) ? DE_PC+4                :
-	isLUI(DE_instr)                      ? Uimm(DE_instr)         :
-	isAUIPC(DE_instr)                    ? DE_PC + Uimm(DE_instr) :
-                                          E_aluOut               ;
+      (isJAL(DE_instr) | isJALR(DE_instr)) ? DE_PC+4                :
+      isLUI(DE_instr)                      ? Uimm(DE_instr)         :
+      isAUIPC(DE_instr)                    ? DE_PC + Uimm(DE_instr) :
+                                            E_aluOut               ;
 
    always @(posedge clk) begin
       EM_PC      <= DE_PC;
       EM_instr   <= DE_instr;
-      EM_rs2     <= DE_rs2;
+      EM_rs2     <= E_rs2_val; // dado de store com encaminhamento
       EM_Eresult <= E_result;
-      EM_addr    <= isStore(DE_instr) ? DE_rs1 + Simm(DE_instr) :
-                                        DE_rs1 + Iimm(DE_instr) ;
+      EM_addr    <= isStore(DE_instr) ?
+                      (E_rs1_val + Simm(DE_instr)) :
+                      (E_rs1_val + Iimm(DE_instr)) ;
    end
 
 /************************ M: Memory *******************************************/
@@ -225,6 +327,7 @@ module riscvpipeline (
    reg [31:0] MW_Mdata;
    reg [31:0] MW_IOresult;
    reg [31:0] MW_CSRresult;
+
    wire [2:0] M_funct3 = funct3(EM_instr);
    wire M_isB = (M_funct3[1:0] == 2'b00);
    wire M_isH = (M_funct3[1:0] == 2'b01);
@@ -233,7 +336,7 @@ module riscvpipeline (
    /*************** STORE **************************/
    wire [31:0] M_STORE_data = EM_rs2;
    assign Address  = EM_addr;
-   assign MemWrite    = isStore(EM_instr);
+   assign MemWrite = isStore(EM_instr);
    assign WriteData = EM_rs2;
 
    always @(posedge clk) begin
@@ -254,8 +357,8 @@ module riscvpipeline (
 
    /*************** LOAD ****************************/
    assign writeBackData = isLoad(MW_instr) ? MW_Mdata : MW_Eresult;
-   assign writeBackEn = writesRd(MW_instr) && rdId(MW_instr) != 0;
-   assign wbRdId = rdId(MW_instr);
+   assign writeBackEn   = writesRd(MW_instr) && rdId(MW_instr) != 0;
+   assign wbRdId        = rdId(MW_instr);
 
    assign jumpOrBranchAddress = E_JumpOrBranchAddr;
    assign jumpOrBranch        = E_JumpOrBranch;
