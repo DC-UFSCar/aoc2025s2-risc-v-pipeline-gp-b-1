@@ -1,0 +1,107 @@
+module testbench();
+  logic        clk, reset, memwrite;
+  logic [31:0] pc, instr;
+  logic [31:0] writedata, addr, readdata;
+
+  logic start;
+  wire [31:0] MEM_readdata, IO_readdata;
+  wire [9:0] ciphertext, trng_out;
+  reg [9:0] key;
+  wire trng_ready, aes_ready;
+
+  reg [9:0] LEDR;
+  reg [3:0] KEY;
+  reg [9:0] SW;
+  reg [6:0] HEX0, HEX1, HEX2, HEX3, HEX4, HEX5;
+  
+  reg [9:0] plaintext;
+  reg [31:0] final_data;
+
+  initial begin
+    KEY[0] = 0;
+    #20 KEY[0] = 1;
+  end
+
+  assign reset = ~KEY[0];
+
+  // memory-mapped i/o
+  wire isIO  = addr[8]; // 0x0000_0100
+  wire isCRPT = addr[9]; // 0x0000_0200
+  wire isRAM = !isIO && !isCRPT;
+
+  localparam IO_LEDS_bit = 2; // 0x0000_0104
+  localparam IO_HEX_bit  = 3; // 0x0000_0108
+  localparam IO_KEY_bit  = 4; // 0x0000_0110 
+  localparam IO_SW_bit   = 5; // 0x0000_0120
+  localparam CRPT_TRNG = 2; // 0x0000_0204
+  localparam CRPT_AES = 3; // 0x0000_0208
+  localparam CRPT_AES_START = 4; // 0x0000_0210
+  localparam CRPT_AES_READY = 5; // 0x0000_0220
+  reg [23:0] hex_digits; // memory-mapped I/O register for HEX
+  dec7seg hex0(hex_digits[ 3: 0], HEX0);
+  dec7seg hex1(hex_digits[ 7: 4], HEX1);
+  dec7seg hex2(hex_digits[11: 8], HEX2);
+  dec7seg hex3(hex_digits[15:12], HEX3);
+  dec7seg hex4(hex_digits[19:16], HEX4);
+  dec7seg hex5(hex_digits[23:20], HEX5);
+  always @(posedge clk) begin
+
+    final_data = writedata;
+
+	  if (reset) begin
+		  LEDR <= 0;
+		  hex_digits <= 0;
+	  end
+    if (memwrite & isIO) begin // memory-mapped I/O
+      if (addr[IO_LEDS_bit])
+        LEDR = final_data;
+      if (addr[IO_HEX_bit])
+        hex_digits = final_data;
+    end
+
+    if (trng_ready && isCRPT && addr[CRPT_TRNG]) begin
+      key <= trng_out;
+      LEDR <= 10'b1111111111;
+    end
+      
+end
+    
+  // microprocessor
+  riscvpipeline cpu(clk, reset, pc, instr, addr, writedata, memwrite, readdata);
+
+  // instructions memory 
+  mem #("text.hex") instr_mem(.clk(clk), .a(pc), .rd(instr));
+
+  // data memory 
+  mem #("data.hex") data_mem(clk, memwrite & isRAM, addr, writedata, MEM_readdata);
+
+  //TRNG
+  trng generator(clk, reset, trng_out, trng_ready);
+
+  //AES10
+  aes10 cripto(clk, start, plaintext, key, ciphertext, aes_ready);
+
+  assign IO_readdata = addr[IO_KEY_bit] ? {28'b0, KEY} :
+                       addr[ IO_SW_bit] ? {22'b0,  SW} : 
+                                           32'b0       ;
+  assign readdata = isIO ? IO_readdata : MEM_readdata; 
+  
+  // initialize test
+  initial
+    begin
+      $dumpfile("dump.vcd"); $dumpvars(0);
+      $monitor(
+        "%3t PC=%h instr=%h wb = %h | %b | key=%b : trng=%b ready?=%b", 
+        $time, pc, instr, cpu.writeBackData, LEDR, key, trng_out, trng_ready
+      );
+      #10000;
+      $writememh("regs.out", cpu.RegisterBank);
+      $finish;
+    end
+
+  // generate clock to sequence tests
+  always
+    begin
+      clk <= 1; # 5; clk <= 0; # 5;
+    end
+endmodule
