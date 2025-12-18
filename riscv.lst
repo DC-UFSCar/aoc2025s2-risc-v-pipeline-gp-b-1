@@ -9,16 +9,22 @@ Disassembly of section .text:
    4:	10800593          	li	a1,264
    8:	11000613          	li	a2,272
    c:	12000693          	li	a3,288
-  10:	20400713          	li	a4,516
-  14:	20800793          	li	a5,520
-  18:	21000813          	li	a6,528
-  1c:	00000413          	li	s0,0
+  10:	20200713          	li	a4,514
+  14:	20400793          	li	a5,516
+  18:	20800813          	li	a6,520
+  1c:	00072403          	lw	s0,0(a4)
+  20:	0006a483          	lw	s1,0(a3)
+  24:	0097a023          	sw	s1,0(a5)
 
-00000020 <loop>:
-  20:	00140413          	addi	s0,s0,1
-  24:	00852023          	sw	s0,0(a0)
-  28:	00872023          	sw	s0,0(a4)
-  2c:	ff5ff06f          	j	20 <loop>
+00000028 <loop>:
+  28:	0006a483          	lw	s1,0(a3)
+  2c:	0097a023          	sw	s1,0(a5)
+  30:	00072283          	lw	t0,0(a4)
+  34:	01252023          	sw	s2,0(a0)
+  38:	fe8288e3          	beq	t0,s0,28 <loop>
+  3c:	00500433          	add	s0,zero,t0
+  40:	00082903          	lw	s2,0(a6)
+  44:	fe5ff06f          	j	28 <loop>
 
 Disassembly of section .riscv.attributes:
 
