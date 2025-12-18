@@ -85,8 +85,8 @@ end
   initial begin
     $dumpfile("dump.vcd"); $dumpvars(0);
     $monitor(
-      "%3t | %b | pt=%b | aout=%b (%d) || key_ready=%b", 
-      $time, LEDR, plaintext, ciphertext, ciphertext, trng_ready
+      "%3t | %b | pt=%b | aout=%b (%b) [%b] || key_ready=%b", 
+      $time, LEDR, plaintext, ciphertext, enc.keys[0], enc.rkeys[0], trng_ready
     );
     #10000;
     $writememh("regs.out", cpu.RegisterBank);
