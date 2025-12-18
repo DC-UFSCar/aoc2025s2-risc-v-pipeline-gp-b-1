@@ -5,25 +5,23 @@ module top (
   output reg [9:0] LEDR,
   output [6:0] HEX5, HEX4, HEX3, HEX2, HEX1, HEX0);
 
-  logic reset, start;
+  logic reset;
   wire memwrite, clk;
   wire [31:0] pc, instr;
   wire [31:0] writedata, addr, readdata;
   integer counter = 0; 
-  wire [31:0] MEM_readdata, IO_readdata;
-  wire [9:0] ciphertext;
-  wire [9:0] key = {10{1'b0}};
-  wire trng_ready, aes_ready;
-  
-  reg [9:0] plaintext;
-  reg [31:0] final_data;
-
   always @(posedge CLOCK_50) 
       counter <= counter + 1;
   assign clk = counter[20];  
 
-  // power-on reset
-  power_on_reset por(clk, reset);
+  wire [31:0] MEM_readdata, IO_readdata;
+  wire [9:0] trng_out, cripto_out;
+  reg [9:0] key;
+  reg [9:0] ciphertext;
+  wire trng_ready;
+  reg [9:0] plaintext;
+  
+  assign reset = ~KEY[0];
 
   // memory-mapped i/o
   wire isIO  = addr[8]; // 0x0000_0100
@@ -34,10 +32,9 @@ module top (
   localparam IO_HEX_bit  = 3; // 0x0000_0108
   localparam IO_KEY_bit  = 4; // 0x0000_0110 
   localparam IO_SW_bit   = 5; // 0x0000_0120
-  localparam CRPT_TRNG = 2; // 0x0000_0204
-  localparam CRPT_AES = 3; // 0x0000_0208
-  localparam CRPT_AES_START = 4; // 0x0000_0210
-  localparam CRPT_AES_READY = 5; // 0x0000_0220
+  localparam CRPT_TRNG = 1; // 0x0000_0202
+  localparam CRPT_SETPT = 2; // 0x0000_0204
+  localparam CRPT_GET_CIPHER = 3; // 0x0000_0208
   reg [23:0] hex_digits; // memory-mapped I/O register for HEX
   dec7seg hex0(hex_digits[ 3: 0], HEX0);
   dec7seg hex1(hex_digits[ 7: 4], HEX1);
@@ -47,39 +44,25 @@ module top (
   dec7seg hex5(hex_digits[23:20], HEX5);
   always @(posedge clk) begin
 
-    final_data = writedata;
-
-    if (~memwrite & isCRPT) begin
-      if (addr[CRPT_AES_READY] & aes_ready) begin
-        final_data = {23'b0, ciphertext};
-      end else begin 
-        final_data = {32'b1};
-      end
-    end
-
 	  if (reset) begin
 		  LEDR <= 0;
 		  hex_digits <= 0;
 	  end
     if (memwrite & isIO) begin // memory-mapped I/O
       if (addr[IO_LEDS_bit])
-        LEDR <= final_data;
+        LEDR <= writedata;
       if (addr[IO_HEX_bit])
-        hex_digits <= final_data;
+        hex_digits <= writedata;
     end
 
-    if (~memwrite & isCRPT) begin
-        if (addr[CRPT_TRNG])
-          LEDR <= trng_out;
+    if (memwrite & isCRPT & addr[CRPT_SETPT]) begin
+      plaintext <= writedata;
     end
 
-    if (memwrite & isCRPT) begin
-      if (addr[CRPT_AES]) begin
-        plaintext <= writedata[9:0];
-        start <= 1;
-      end
+    if (trng_ready) begin
+      LEDR <= 10'b1111111111;
+      key <= trng_out;
     end
-      
 end
     
   // microprocessor
@@ -94,12 +77,14 @@ end
   //TRNG
   trng generator(clk, reset, trng_out, trng_ready);
 
-  //AES10
-  aes10 cripto(clk, start, plaintext, key, ciphertext, aes_ready);
+  //Cripto module
+  cripto enc(clk, reset, plaintext, key, ciphertext);
 
-  assign IO_readdata = addr[IO_KEY_bit] ? {28'b0, KEY} :
-                       addr[ IO_SW_bit] ? {22'b0,  SW} : 
-                                           32'b0       ;
-  assign readdata = isIO ? IO_readdata : MEM_readdata; 
-
+  assign IO_readdata = addr[     IO_KEY_bit] ? {28'b0, KEY} :
+                       addr[      IO_SW_bit] ? {22'b0,  SW} :
+                       addr[      CRPT_TRNG] ? {22'b0, key} :
+                       addr[CRPT_GET_CIPHER] ? {22'b0, ciphertext} :
+                                                32'b0       ;
+  assign readdata = (isIO || (isCRPT && addr[CRPT_TRNG]) || (isCRPT && addr[CRPT_GET_CIPHER])) ? IO_readdata : MEM_readdata; 
+  
 endmodule
